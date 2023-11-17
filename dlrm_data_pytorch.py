@@ -666,6 +666,15 @@ class RandomDataset(Dataset):
                 self.trace_file,
                 self.enable_padding,
             )
+        elif self.data_generation.startswith('prod'):
+            (X, lS_o, lS_i) = generate_alibaba_input_batch(
+                self.m_den,
+                self.ln_emb,
+                n,
+                self.num_indices_per_lookup,
+                self.num_indices_per_lookup_fixed,
+                self.data_generation,
+            )
         else:
             sys.exit(
                 "ERROR: --data-generation=" + self.data_generation + " is not supported"
@@ -1036,6 +1045,72 @@ def generate_synthetic_input_batch(
         lS_emb_indices.append(torch.tensor(lS_batch_indices))
 
     return (Xt, lS_emb_offsets, lS_emb_indices)
+
+def open_gen(name, rows):
+    with open(name) as f:
+        idx = list(filter(lambda x: x < rows, map(int, f.readlines())))
+    while True:
+        for x in idx:
+            yield x
+
+dataset_gen = None
+def get_gen(dgen):
+    global dataset_gen
+    if dataset_gen is None:
+        _, fname, rows = dgen.split(',')
+        # '/home/cc/dataset/items_in_buy.txt'
+        # '/home/cc/Downloads/dlrm_datasets/table_fbgemm_t856_bs65536_0/table_0.txt'
+        dataset_gen = open_gen(fname, int(rows))
+    return dataset_gen
+
+def generate_alibaba_input_batch(
+    m_den,
+    ln_emb,
+    n,
+    num_indices_per_lookup,
+    num_indices_per_lookup_fixed,
+    data_generation,
+):
+    # alibaba dataset
+    print('dataset', data_generation)
+    cur_gen = get_gen(data_generation)
+
+    # dense feature
+    Xt = torch.tensor(ra.rand(n, m_den).astype(np.float32))
+
+    # sparse feature (sparse indices)
+    lS_emb_offsets = []
+    lS_emb_indices = []
+    # for each embedding generate a list of n lookups,
+    # where each lookup is composed of multiple sparse indices
+    for size in ln_emb:
+        lS_batch_offsets = []
+        lS_batch_indices = []
+        offset = 0
+        for _ in range(n):
+            # num of sparse indices to be used per embedding (between
+            if num_indices_per_lookup_fixed:
+                sparse_group_size = np.int64(num_indices_per_lookup)
+            else:
+                # random between [1,num_indices_per_lookup])
+                r = ra.random(1)
+                sparse_group_size = np.int64(
+                    np.round(max([1.0], r * min(size, num_indices_per_lookup)))
+                )
+            # sparse indices to be used per embedding
+            r = ra.random(sparse_group_size)
+            sparse_group = np.unique(np.round(r * (size - 1)).astype(np.int64))
+            # reset sparse_group_size in case some index duplicates were removed
+            sparse_group_size = np.int64(sparse_group.size)
+            # store lengths and indices
+            lS_batch_offsets += [offset]
+            lS_batch_indices += [x for _, x in zip(range(sparse_group_size), cur_gen)]
+            # update offset for next iteration
+            offset += sparse_group_size
+        lS_emb_offsets.append(torch.tensor(lS_batch_offsets))
+        lS_emb_indices.append(torch.tensor(lS_batch_indices))
+
+    return (Xt, lS_emb_offsets, lS_emb_indices) 
 
 
 def generate_stack_distance(cumm_val, cumm_dist, max_i, i, enable_padding=False):

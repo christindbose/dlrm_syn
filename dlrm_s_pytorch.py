@@ -61,6 +61,7 @@ import datetime
 import json
 import sys
 import time
+import os
 
 # onnx
 # The onnx import causes deprecation warnings every time workers
@@ -82,17 +83,6 @@ import sklearn.metrics
 # pytorch
 import torch
 import torch.nn as nn
-
-# dataloader
-try:
-    from internals import (
-        fbDataLoader,
-        fbInputBatchFormatter,
-    )
-    has_internal_libs = True
-except ImportError:
-    has_internal_libs = False
-
 from torch._ops import ops
 from torch.autograd.profiler import record_function
 from torch.nn.parallel.parallel_apply import parallel_apply
@@ -101,6 +91,9 @@ from torch.nn.parallel.scatter_gather import gather, scatter
 from torch.nn.parameter import Parameter
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.tensorboard import SummaryWriter
+import torch.cuda.nvtx as nvtx
+
+#os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
 
 # mixed-dimension trick
 from tricks.md_embedding_bag import md_solver, PrEmbeddingBag
@@ -161,11 +154,8 @@ def loss_fn_wrap(Z, T, use_gpu, device):
 # The following function is a wrapper to avoid checking this multiple times in th
 # loop below.
 def unpack_batch(b):
-    if args.data_generation == "internal":
-        return fbInputBatchFormatter(b,args.data_size)
-    else:
     # Experiment with unweighted samples
-        return b[0], b[1], b[2], b[3], torch.ones(b[3].size()), None
+    return b[0], b[1], b[2], b[3], torch.ones(b[3].size()), None
 
 
 class LRPolicyScheduler(_LRScheduler):
@@ -555,6 +545,7 @@ class DLRM_Net(nn.Module):
 
         # embeddings
         with record_function("DLRM embedding forward"):
+            nvtx.range_push("DLRM_embedding_forward")
             ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
 
         # WARNING: Note that at this point we have the result of the embedding lookup
@@ -568,6 +559,7 @@ class DLRM_Net(nn.Module):
         a2a_req = ext_dist.alltoall(ly, self.n_emb_per_rank)
 
         with record_function("DLRM bottom nlp forward"):
+            nvtx.range_push("DLRM_bottom_nlp_forward")
             x = self.apply_mlp(dense_x, self.bot_l)
 
         ly = a2a_req.wait()
@@ -575,10 +567,12 @@ class DLRM_Net(nn.Module):
 
         # interactions
         with record_function("DLRM interaction forward"):
+            nvtx.range_push("DLRM_interaction_forward")
             z = self.interact_features(x, ly)
 
         # top mlp
         with record_function("DLRM top nlp forward"):
+            nvtx.range_push("DLRM_top_nlp_forward")
             p = self.apply_mlp(z, self.top_l)
 
         # clamp output if needed
@@ -943,8 +937,8 @@ def run():
     parser.add_argument("--data-size", type=int, default=1)
     parser.add_argument("--num-batches", type=int, default=0)
     parser.add_argument(
-        "--data-generation", type=str,choices=["random","dataset","internal"], default="random"
-    )  # synthetic, dataset or internal
+        "--data-generation", type=str, default="random"
+    )  # synthetic or dataset
     parser.add_argument(
         "--rand-data-dist", type=str, default="uniform"
     )  # uniform or gaussian
@@ -1021,6 +1015,7 @@ def run():
     parser.add_argument("--lr-num-warmup-steps", type=int, default=0)
     parser.add_argument("--lr-decay-start-step", type=int, default=0)
     parser.add_argument("--lr-num-decay-steps", type=int, default=0)
+    parser.add_argument("--break-point", type=int, default=10)
 
     global args
     global nbatches
@@ -1124,14 +1119,6 @@ def run():
             ln_emb = np.array(ln_emb)
         m_den = train_data.m_den
         ln_bot[0] = m_den
-    elif args.data_generation == "internal":
-        if not has_internal_libs:
-            raise Exception("Internal libraries are not available.")
-        NUM_BATCHES = 5000
-        nbatches = args.num_batches if args.num_batches > 0 else NUM_BATCHES
-        train_ld,feature_to_num_embeddings = fbDataLoader(args.data_size,nbatches)
-        ln_emb = np.array(list(feature_to_num_embeddings.values()))
-        m_den = ln_bot[0]
     else:
         # input and target at random
         ln_emb = np.fromstring(args.arch_embedding_size, dtype=int, sep="-")
@@ -1541,11 +1528,17 @@ def run():
                     previous_iteration_time = None
 
                 for j, inputBatch in enumerate(train_ld):
+
+                    torch.cuda.cudart().cudaProfilerStart()
+
                     if j == 0 and args.save_onnx:
                         X_onnx, lS_o_onnx, lS_i_onnx, _, _, _ = unpack_batch(inputBatch)
-
+                
                     if j < skip_upto_batch:
                         continue
+                    
+                    if j > args.break_point:
+                        break                                      
 
                     X, lS_o, lS_i, T, W, CBPP = unpack_batch(inputBatch)
 
@@ -1604,7 +1597,8 @@ def run():
                     # A = np.sum((np.round(S, 0) == T).astype(np.uint8))
 
                     with record_function("DLRM backward"):
-                        # scaled error gradient propagation
+                        nvtx.range_push("DLRM_backward")
+						# scaled error gradient propagation
                         # (where we do not accumulate gradients across mini-batches)
                         if (
                             args.mlperf_logging
@@ -1612,7 +1606,17 @@ def run():
                         ) or not args.mlperf_logging:
                             optimizer.zero_grad()
                         # backward pass
-                        E.backward()
+                        E.backward()                            
+                        nvtx.range_pop()
+                        param_size = 0
+                        for param in dlrm.parameters():
+                            param_size += param.nelement() * param.element_size()
+
+                        buffer_size = 0
+                        for buffer in dlrm.buffers():
+                            buffer_size += buffer.nelement() * buffer.element_size()
+                        size_all_mb = (param_size + buffer_size) / 1024**2
+                        print('DLRM model size: {:.3f}MB'.format(size_all_mb))
 
                         # optimizer
                         if (
@@ -1671,6 +1675,8 @@ def run():
 
                         total_iter = 0
                         total_samp = 0
+                    
+                    torch.cuda.cudart().cudaProfilerStop()
 
                     # testing
                     if should_test:
