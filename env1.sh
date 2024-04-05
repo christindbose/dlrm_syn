@@ -8,7 +8,7 @@ PyGenTbl='import sys; rows,tables=sys.argv[1:3]; print("-".join([rows]*int(table
 PyGetCore='import sys; c=int(sys.argv[1]); print(",".join(str(2*i) for i in range(c)))'
 PyGetHT='import sys; c=int(sys.argv[1]); print(",".join(str(2*i + off) for off in (0, 48) for i in range(c)))'
 NUM_BATCH=120
-BS=2048
+BS=32 #8192
 LOG=print_out.log
 INSTANCES=1
 

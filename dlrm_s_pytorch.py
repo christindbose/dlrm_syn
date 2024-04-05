@@ -676,7 +676,13 @@ class DLRM_Net(nn.Module):
         # print(x)
 
         # embeddings
+        torch.cuda.nvtx.range_push("EMB start")
+        torch.cuda.cudart().cudaProfilerStart()
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
+        torch.cuda.cudart().cudaProfilerStop()
+        torch.cuda.nvtx.range_pop()
+        
+
         # debug prints
         # print(ly)
 
@@ -688,7 +694,8 @@ class DLRM_Net(nn.Module):
         # could be used for subsequent interactions on each device.
         if len(self.emb_l) != len(ly):
             sys.exit("ERROR: corrupted intermediate result in parallel_forward call")
-
+        
+        torch.cuda.nvtx.range_push("scatter start")
         t_list = []
         for k, _ in enumerate(self.emb_l):
             d = torch.device("cuda:" + str(k % ndevices))
@@ -696,6 +703,7 @@ class DLRM_Net(nn.Module):
             t_list.append(y)
         # adjust the list to be ordered per device
         ly = list(map(lambda y: list(y), zip(*t_list)))
+        torch.cuda.nvtx.range_pop()
         # debug prints
         # print(ly)
 
@@ -1363,6 +1371,19 @@ def run():
             args.lr_num_decay_steps,
         )
 
+    param_size = 0
+
+    for param in dlrm.parameters():
+       param_size += param.nelement() * param.element_size()
+    
+    buffer_size = 0
+    
+    for buffer in dlrm.buffers():
+       buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    print('DLRM model size: {:.3f}MB'.format(size_all_mb))
+    
     ### main loop ###
 
     # training or inference
@@ -1529,6 +1550,7 @@ def run():
 
                 for j, inputBatch in enumerate(train_ld):
 
+                    torch.cuda.nvtx.range_push("FW start")
                     torch.cuda.cudart().cudaProfilerStart()
 
                     if j == 0 and args.save_onnx:
@@ -1677,6 +1699,7 @@ def run():
                         total_samp = 0
                     
                     torch.cuda.cudart().cudaProfilerStop()
+                    torch.cuda.nvtx.range_pop()
 
                     # testing
                     if should_test:

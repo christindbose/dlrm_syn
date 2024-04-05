@@ -61,6 +61,7 @@ import datetime
 import json
 import sys
 import time
+import threading
 
 # onnx
 # The onnx import causes deprecation warnings every time workers
@@ -734,7 +735,7 @@ class DLRM_Net(nn.Module):
         slice_size = (lS_o[0].shape[0]+ndevices-1) // ndevices
 
         #nvtx.range_push("EMB lookup UVM")
-        for device_id in device_ids:
+        def EMB_lookup(device_id):
             #print("device_id:", device_id)
             y = []
             # last device
@@ -777,9 +778,9 @@ class DLRM_Net(nn.Module):
 
             #print("len(ls_i):", len(one_lS_i), one_lS_i[0])
             torch.cuda.nvtx.range_push("EMB start")
-            #torch.cuda.cudart().cudaProfilerStart()
+            torch.cuda.cudart().cudaProfilerStart()
             y = self.apply_emb(new_lS_o, one_lS_i, self.emb_l, self.v_W_l)
-            #torch.cuda.cudart().cudaProfilerStop()
+            torch.cuda.cudart().cudaProfilerStop()
             torch.cuda.nvtx.range_pop()
             
             for k, sy in enumerate(y):
@@ -802,6 +803,19 @@ class DLRM_Net(nn.Module):
             #print("len(y): ", len(y))
             #print("len(y[0]): ", len(y[0]), y)
             ly.append(y)
+
+        #torch.cuda.cudart().cudaProfilerStop()
+
+        thread_pool = []
+        for device_id in device_ids:
+            thread_pool.append(threading.Thread(target=EMB_lookup, args=(device_id,)))
+
+        for t in thread_pool:
+            t.start()
+
+        for t in thread_pool:
+            t.join()      
+
 
         #torch.cuda.cudart().cudaProfilerStop()
                    
@@ -1705,8 +1719,8 @@ def run():
                     #if j > 10:
                     #    break
 
-                    torch.cuda.cudart().cudaProfilerStart()
-                    torch.cuda.nvtx.range_push("fwd start")
+                    #torch.cuda.cudart().cudaProfilerStart()
+                    torch.cuda.nvtx.range_push("iter start")
 
                     if j == 0 and args.save_onnx:
                         X_onnx, lS_o_onnx, lS_i_onnx, _, _, _ = unpack_batch(inputBatch)
@@ -1932,7 +1946,7 @@ def run():
                                     },
                                 )
                             break
-                    torch.cuda.cudart().cudaProfilerStop()
+                    #torch.cuda.cudart().cudaProfilerStop()
                     torch.cuda.nvtx.range_pop()
 
 
