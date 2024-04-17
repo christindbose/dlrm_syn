@@ -8,7 +8,7 @@ MODELS_PATH=$PWD
 #### Hyper Parameters that might need to change
 REUSE_LEVEL='low' #'medium', 'high'
 NUM_BATCH=120
-BS=32 #8192
+BS=2048 #8192
 LOG=print_out.log
 INSTANCES=1
 DLRM_SYSTEMS='/home/tgrogers-raid/a/liu2550/DLRM_synthetic'
