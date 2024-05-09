@@ -616,6 +616,11 @@ class DLRM_Net(nn.Module):
         batch_size = dense_x.size()[0]
         ndevices = min(self.ndevices, batch_size, len(self.emb_l))
         device_ids = range(ndevices)
+
+        def sync_all(): 
+            for device_id in device_ids:
+                torch.cuda.synchronize(device_id)
+        
         # WARNING: must redistribute the model if mini-batch size changes(this is common
         # for last mini-batch, when # of elements in the dataset/batch size is not even
         if self.parallel_model_batch_size != batch_size:
@@ -650,7 +655,10 @@ class DLRM_Net(nn.Module):
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
+        torch.cuda.nvtx.range_push("scatter dense")
         dense_x = scatter(dense_x, device_ids, dim=0)
+        sync_all()
+        torch.cuda.nvtx.range_pop()
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
@@ -671,7 +679,10 @@ class DLRM_Net(nn.Module):
         # inputs that has been scattered across devices on the first (batch) dimension.
         # The output is a list of tensors scattered across devices according to the
         # distribution of dense_x.
+        torch.cuda.nvtx.range_push("parallel apply bot")
         x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
+        sync_all()
+        torch.cuda.nvtx.range_pop()
         # debug prints
         # print(x)
 
@@ -680,6 +691,7 @@ class DLRM_Net(nn.Module):
         torch.cuda.cudart().cudaProfilerStart()
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
         torch.cuda.cudart().cudaProfilerStop()
+        sync_all()
         torch.cuda.nvtx.range_pop()
         
 
@@ -701,17 +713,23 @@ class DLRM_Net(nn.Module):
             d = torch.device("cuda:" + str(k % ndevices))
             y = scatter(ly[k], device_ids, dim=0)
             t_list.append(y)
+        
+        sync_all()
+        torch.cuda.nvtx.range_pop()
         # adjust the list to be ordered per device
         ly = list(map(lambda y: list(y), zip(*t_list)))
-        torch.cuda.nvtx.range_pop()
+        
         # debug prints
         # print(ly)
 
         # interactions
+        torch.cuda.nvtx.range_push("interact start")
         z = []
         for k in range(ndevices):
             zk = self.interact_features(x[k], ly[k])
             z.append(zk)
+        sync_all()
+        torch.cuda.nvtx.range_pop()
         # debug prints
         # print(z)
 
@@ -721,10 +739,16 @@ class DLRM_Net(nn.Module):
         # that by construction are scattered across devices on the first (batch) dim.
         # The output is a list of tensors scattered across devices according to the
         # distribution of z.
+        torch.cuda.nvtx.range_push("parallel apply top")
         p = parallel_apply(self.top_l_replicas, z, None, device_ids)
+        sync_all()
+        torch.cuda.nvtx.range_pop()
 
         ### gather the distributed results ###
+        torch.cuda.nvtx.range_push("gather start")
         p0 = gather(p, self.output_d, dim=0)
+        sync_all()
+        torch.cuda.nvtx.range_pop()
 
         # clamp output if needed
         if 0.0 < self.loss_threshold and self.loss_threshold < 1.0:
