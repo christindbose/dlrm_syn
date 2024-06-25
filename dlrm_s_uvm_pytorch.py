@@ -266,6 +266,7 @@ class DLRM_Net(nn.Module):
                 ).astype(np.float32)
                 EE.embs.weight.data = torch.tensor(W, requires_grad=True)
             else:
+                #print(f"n={n}, m={m}")
                 EE = nn.EmbeddingBag(n, m, mode="sum", sparse=True)
                 # initialize embeddings
                 # nn.init.uniform_(EE.weight, a=-np.sqrt(1 / n), b=np.sqrt(1 / n))
@@ -442,12 +443,21 @@ class DLRM_Net(nn.Module):
 
                 ly.append(QV)
             else:
+
+                
                 E = emb_l[k]
                 V = E(
                     sparse_index_group_batch,
                     sparse_offset_group_batch,
                     per_sample_weights=per_sample_weights,
                 )
+
+                print(f"len(sparse_index_group_batch) ={len(sparse_index_group_batch)} len(sparse_offset_group_batch) ={len(sparse_offset_group_batch)}")
+                print(f"sparse_index_group_batch[0]={sparse_index_group_batch[0]}")
+                print(f"sparse_index_group_batch device={sparse_index_group_batch.device}")
+                print(f"sparse_offset_group_batch device={sparse_offset_group_batch.device}")
+
+                print(f"embedding output device ={V.device}")
                 
                 """
                 if k == 0: 
